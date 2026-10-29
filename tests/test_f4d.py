@@ -88,6 +88,8 @@ def test_f4d_metadata_and_default_sources(remote_metadata: Mock, tmp_path: Path)
     assert "lidar_top" not in dataset.features.ALL
     assert dataset.revision == "f4d-revision"
     assert dataset.pai_source.revision == "pai-revision"
+    assert dataset.split_name is None
+    assert dataset.pai_source.split_name is None
     assert dataset.cache_dir == tmp_path / "f4d-cache"
     assert dataset.pai_source.cache_dir == tmp_path / "pai-cache"
     for call in remote_metadata.hf_hub_download.call_args_list:

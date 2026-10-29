@@ -53,7 +53,8 @@ class F4DDatasetInterface(PhysicalAIAVDatasetInterface):
             cache_dir: Cache for F4D downloads and its file inventory.
             local_dir: Optional destination for F4D downloads.
             confirm_download_threshold_gb: Download confirmation threshold in GiB.
-            pai_source: Existing PAI source for sensor features.
+            pai_source: Existing PAI source for sensor features. The default source reads no
+                PAI split file (``split_name=None``); F4D's split is ``splits/test-total.txt``.
             pai_revision: Revision for the default remote PAI source.
             pai_cache_dir: Separate PAI download cache; F4D's local directory is not reused.
         """
@@ -65,6 +66,7 @@ class F4DDatasetInterface(PhysicalAIAVDatasetInterface):
                 token=token,
                 cache_dir=pai_cache_dir,
                 confirm_download_threshold_gb=confirm_download_threshold_gb,
+                split_name=None,
             )
         )
         super().__init__(
@@ -74,6 +76,7 @@ class F4DDatasetInterface(PhysicalAIAVDatasetInterface):
             cache_dir=cache_dir,
             local_dir=local_dir,
             confirm_download_threshold_gb=confirm_download_threshold_gb,
+            split_name=None,
         )
 
     def _load_metadata(self) -> None:

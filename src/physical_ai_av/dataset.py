@@ -22,6 +22,14 @@ from physical_ai_av.utils import hf_interface
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_SPLIT_DEPRECATION_WARNING = (
+    "The `default` split is deprecated and will be removed from the dataset in a later release: "
+    "it is not aligned with the training data of NVIDIA's Alpamayo models, so evaluating a "
+    "released Alpamayo checkpoint on its `val` / `test` clips leaks training data. Pass "
+    '`split_name="alpamayo_aligned"` for the aligned train/test split (the Splits section of the '
+    "dataset card lists all split files), or `split_name=None` to attach no split."
+)
+
 
 class PhysicalAIAVDatasetInterface(hf_interface.HfRepoInterface):
     """Interface for interacting with the PhysicalAI-Autonomous-Vehicles dataset on Hugging Face.
@@ -44,8 +52,15 @@ class PhysicalAIAVDatasetInterface(hf_interface.HfRepoInterface):
         confirm_download_threshold_gb (`float`): The threshold (in GB) of additional (uncached) file
             size beyond which the user is prompted for confirmation before downloading. Set to
             `float("inf")` to disable confirmation.
+        split_name (`str | None`): Name of the split file `splits/<split_name>.parquet` whose
+            columns (`split`, plus any further per-clip column such as the `t0` anchors of
+            `challenging_scenarios`) are added to `clip_index`; clips a partial split file does
+            not list get NaN. `None` reads no split file (an older revision's own `split` column
+            in `clip_index.parquet` is left as is). The default, `"default"`, is deprecated and
+            logs `DEFAULT_SPLIT_DEPRECATION_WARNING` whenever that split is in use.
         features (`Features`): A representation of dataset features amenable to `.`-autocompletion.
-        clip_index (`pd.DataFrame`): A clip index mapping `clip_id`s to `chunk` indices.
+        clip_index (`pd.DataFrame`): A clip index mapping `clip_id`s to `chunk` indices, extended
+            with the columns of the selected split file.
         feature_presence (`pd.DataFrame`): A table mapping `clip_id`s to available features.
         chunk_feature_presence (`pd.DataFrame`): A table of feature presence aggregated by chunk;
             used to determine which per-chunk packed files should exist in the dataset.
@@ -61,7 +76,7 @@ class PhysicalAIAVDatasetInterface(hf_interface.HfRepoInterface):
         cache_dir: str | pathlib.Path | None = None,
         local_dir: str | pathlib.Path | None = None,
         confirm_download_threshold_gb: float = 10.0,
-        split_name: str = "default",
+        split_name: str | None = "default",
     ) -> None:
         self.split_name = split_name
         super().__init__(
@@ -84,8 +99,13 @@ class PhysicalAIAVDatasetInterface(hf_interface.HfRepoInterface):
         self.features = Features(features_df)
 
         self.clip_index = pd.read_parquet(self.download_file("clip_index.parquet"))
-        if self.split_name != "default" or self._has_file("splits/default.parquet"):
-            self.clip_index["split"] = self._load_split_labels(self.split_name)
+        if self.split_name is not None and (
+            self.split_name != "default" or self._has_file("splits/default.parquet")
+        ):
+            for column, values in self._load_split_labels(self.split_name).items():
+                self.clip_index[column] = values
+        if self.split_name == "default" and "split" in self.clip_index.columns:
+            logger.warning(DEFAULT_SPLIT_DEPRECATION_WARNING)
         if (
             self.is_offline_mode
             and not self.is_file_cached("metadata/feature_presence.parquet")
@@ -127,14 +147,29 @@ class PhysicalAIAVDatasetInterface(hf_interface.HfRepoInterface):
             and self.api.file_exists(filename=filename, **self.repo_snapshot_info)
         )
 
-    def _load_split_labels(self, split_name: str) -> pd.Series:
-        """Returns the `split` label of every clip in `clip_index` from `splits/<split_name>.parquet`."""
-        labels = pd.read_parquet(self.download_file(f"splits/{split_name}.parquet"))["split"]
+    def _load_split_labels(self, split_name: str) -> pd.DataFrame:
+        """Returns the columns of `splits/<split_name>.parquet` reindexed to `clip_index`.
+
+        A split file has a `clip_id` index and a `split` column; any further per-clip column (e.g.
+        the `t0` anchors of `challenging_scenarios`) is returned as well. The file may list only
+        part of the dataset: clips it does not list get NaN values.
+        """
+        labels = pd.read_parquet(self.download_file(f"splits/{split_name}.parquet"))
+        if "split" not in labels.columns:
+            raise ValueError(f"splits/{split_name}.parquet has no `split` column.")
+        if not labels.index.is_unique:
+            raise ValueError(f"splits/{split_name}.parquet lists some clips more than once.")
         unknown = labels.index.difference(self.clip_index.index)
         if len(unknown):
             raise ValueError(
                 f"splits/{split_name}.parquet labels {len(unknown)} clips absent from "
                 f"clip_index.parquet, e.g. {unknown[:3].tolist()}."
+            )
+        collisions = labels.columns.difference(["split"]).intersection(self.clip_index.columns)
+        if len(collisions):
+            raise ValueError(
+                f"splits/{split_name}.parquet columns {collisions.tolist()} already exist in "
+                "clip_index.parquet."
             )
         return labels.reindex(self.clip_index.index)
 
