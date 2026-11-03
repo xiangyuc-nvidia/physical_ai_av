@@ -179,9 +179,6 @@ def test_partial_split_keeps_its_clips_only(
     assert dataset.feature_presence.index.tolist() == ["clip", "third"]
     assert dataset.data_collection.index.tolist() == ["clip", "third"]
     assert dataset.chunk_feature_presence.index.tolist() == [1]
-    assert dataset.get_clip_feature("third", "payload")["data"].read() == b"original"
-    with pytest.raises(KeyError):
-        dataset.get_clip_feature("other", "payload")
     messages = [(record.levelno, record.message) for record in caplog.records]
     assert messages == [
         (
@@ -189,6 +186,9 @@ def test_partial_split_keeps_its_clips_only(
             "splits/anchors.parquet lists 2 of 3 clips; clip_index keeps those clips only.",
         )
     ]
+    assert dataset.get_clip_feature("third", "payload")["data"].read() == b"original"
+    with pytest.raises(KeyError):
+        dataset.get_clip_feature("other", "payload")
 
 
 def test_split_name_none_reads_no_split_file(
