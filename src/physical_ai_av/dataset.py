@@ -54,13 +54,15 @@ class PhysicalAIAVDatasetInterface(hf_interface.HfRepoInterface):
             `float("inf")` to disable confirmation.
         split_name (`str | None`): Name of the split file `splits/<split_name>.parquet` whose
             columns (`split`, plus any further per-clip column such as the `t0` anchors of
-            `challenging_scenarios`) are added to `clip_index`; clips a partial split file does
-            not list get NaN. `None` reads no split file (an older revision's own `split` column
-            in `clip_index.parquet` is left as is). The default, `"default"`, is deprecated and
-            logs `DEFAULT_SPLIT_DEPRECATION_WARNING` whenever that split is in use.
+            `challenging_scenarios`) are added to `clip_index`. A split file that lists only a
+            subset of the dataset restricts `clip_index`, `feature_presence`, and
+            `data_collection` to the clips it lists. `None` reads no split file (an older
+            revision's own `split` column in `clip_index.parquet` is left as is). The default,
+            `"default"`, is deprecated and logs `DEFAULT_SPLIT_DEPRECATION_WARNING` whenever that
+            split is in use.
         features (`Features`): A representation of dataset features amenable to `.`-autocompletion.
         clip_index (`pd.DataFrame`): A clip index mapping `clip_id`s to `chunk` indices, extended
-            with the columns of the selected split file.
+            with the columns of the selected split file and restricted to the clips it lists.
         feature_presence (`pd.DataFrame`): A table mapping `clip_id`s to available features.
         chunk_feature_presence (`pd.DataFrame`): A table of feature presence aggregated by chunk;
             used to determine which per-chunk packed files should exist in the dataset.
@@ -102,7 +104,16 @@ class PhysicalAIAVDatasetInterface(hf_interface.HfRepoInterface):
         if self.split_name is not None and (
             self.split_name != "default" or self._has_file("splits/default.parquet")
         ):
-            for column, values in self._load_split_labels(self.split_name).items():
+            labels = self._load_split_labels(self.split_name)
+            if len(labels) < len(self.clip_index):
+                logger.info(
+                    "splits/%s.parquet lists %d of %d clips; clip_index keeps those clips only.",
+                    self.split_name,
+                    len(labels),
+                    len(self.clip_index),
+                )
+                self.clip_index = self.clip_index[self.clip_index.index.isin(labels.index)]
+            for column, values in labels.reindex(self.clip_index.index).items():
                 self.clip_index[column] = values
         if self.split_name == "default" and "split" in self.clip_index.columns:
             logger.warning(DEFAULT_SPLIT_DEPRECATION_WARNING)
@@ -127,9 +138,10 @@ class PhysicalAIAVDatasetInterface(hf_interface.HfRepoInterface):
                 self.download_file("metadata/sensor_presence.parquet")
             )
             self.feature_presence = self.sensor_presence.select_dtypes(include=bool)
+        self.feature_presence = self._restrict_to_clip_index(self.feature_presence)
 
-        self.data_collection = pd.read_parquet(
-            self.download_file("metadata/data_collection.parquet")
+        self.data_collection = self._restrict_to_clip_index(
+            pd.read_parquet(self.download_file("metadata/data_collection.parquet"))
         )
         self.chunk_feature_presence = (
             pd.concat(
@@ -147,12 +159,18 @@ class PhysicalAIAVDatasetInterface(hf_interface.HfRepoInterface):
             and self.api.file_exists(filename=filename, **self.repo_snapshot_info)
         )
 
+    def _restrict_to_clip_index(self, table: pd.DataFrame) -> pd.DataFrame:
+        """Returns the rows of a per-clip `table` whose clips are in `clip_index`."""
+        if len(table) == len(self.clip_index):
+            return table
+        return table[table.index.isin(self.clip_index.index)]
+
     def _load_split_labels(self, split_name: str) -> pd.DataFrame:
-        """Returns the columns of `splits/<split_name>.parquet` reindexed to `clip_index`.
+        """Returns the validated columns of `splits/<split_name>.parquet`, indexed by `clip_id`.
 
         A split file has a `clip_id` index and a `split` column; any further per-clip column (e.g.
         the `t0` anchors of `challenging_scenarios`) is returned as well. The file may list only
-        part of the dataset: clips it does not list get NaN values.
+        part of the dataset.
         """
         labels = pd.read_parquet(self.download_file(f"splits/{split_name}.parquet"))
         if "split" not in labels.columns:
@@ -171,7 +189,7 @@ class PhysicalAIAVDatasetInterface(hf_interface.HfRepoInterface):
                 f"splits/{split_name}.parquet columns {collisions.tolist()} already exist in "
                 "clip_index.parquet."
             )
-        return labels.reindex(self.clip_index.index)
+        return labels
 
     def download_metadata(self) -> None:
         """Downloads dataset metadata, e.g., for the purpose of clip/chunk selection."""

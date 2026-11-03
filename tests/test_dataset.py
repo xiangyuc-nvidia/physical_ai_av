@@ -137,16 +137,52 @@ def test_named_split_adds_its_columns_without_warning(
     dataset_factory: Callable[..., PhysicalAIAVDatasetInterface],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Attach every column of a partial split file to `clip_index`; unlisted clips get NaN."""
-    labels = _split_file(split=["test"], t0=[[2_000_000, 5_000_000]])
+    """Attach every column of a complete split file to `clip_index`, keeping every clip."""
+    labels = pd.DataFrame(
+        {"split": ["test", "train"], "t0": [[2_000_000, 5_000_000], []]},
+        index=pd.Index(["other", "clip"], name="clip_id"),
+    )
     with caplog.at_level(logging.WARNING, logger="physical_ai_av"):
         dataset = dataset_factory(
             clip_ids=("clip", "other"), split_files={"anchors": labels}, split_name="anchors"
         )
-    assert dataset.clip_index.loc["clip", "split"] == "test"
-    assert list(dataset.clip_index.loc["clip", "t0"]) == [2_000_000, 5_000_000]
-    assert dataset.clip_index.loc["other", ["split", "t0"]].isna().all()
+    assert dataset.clip_index.index.tolist() == ["clip", "other"]
+    assert dataset.clip_index["split"].tolist() == ["train", "test"]
+    assert list(dataset.clip_index.loc["other", "t0"]) == [2_000_000, 5_000_000]
     assert _warnings(caplog) == []
+
+
+def test_partial_split_keeps_its_clips_only(
+    dataset_factory: Callable[..., PhysicalAIAVDatasetInterface],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Restrict the per-clip tables to the clips a partial split file lists, in index order."""
+    labels = pd.DataFrame(
+        {"split": ["test", "test"], "t0": [[7_000_000], [2_000_000, 5_000_000]]},
+        index=pd.Index(["third", "clip"], name="clip_id"),
+    )
+    with caplog.at_level(logging.INFO, logger="physical_ai_av"):
+        dataset = dataset_factory(
+            clip_ids=("clip", "other", "third"),
+            split_files={"anchors": labels},
+            split_name="anchors",
+        )
+    assert dataset.clip_index.index.tolist() == ["clip", "third"]
+    assert dataset.clip_index["split"].tolist() == ["test", "test"]
+    assert list(dataset.clip_index.loc["clip", "t0"]) == [2_000_000, 5_000_000]
+    assert dataset.feature_presence.index.tolist() == ["clip", "third"]
+    assert dataset.data_collection.index.tolist() == ["clip", "third"]
+    assert dataset.chunk_feature_presence.index.tolist() == [1]
+    assert "other" not in dataset.clip_index.index
+    with pytest.raises(KeyError):
+        dataset.get_clip_feature("other", "payload")
+    messages = [(record.levelno, record.message) for record in caplog.records]
+    assert messages == [
+        (
+            logging.INFO,
+            "splits/anchors.parquet lists 2 of 3 clips; clip_index keeps those clips only.",
+        )
+    ]
 
 
 def test_split_name_none_reads_no_split_file(
