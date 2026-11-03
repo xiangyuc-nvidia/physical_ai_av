@@ -24,7 +24,7 @@ def dataset_factory(
 
     def create(
         repo_id: str = "nvidia/PhysicalAI-Autonomous-Vehicles",
-        chunk: int = 1,
+        chunk: int | dict[str, int] = 1,
         payload: bytes = b"original",
         feature_sources: dict[str, PhysicalAIAVDatasetInterface] | None = None,
         clip_ids: tuple[str, ...] = ("clip",),
@@ -47,7 +47,10 @@ def dataset_factory(
             ],
             columns=["feature", "directory", "chunk_path", "clip_files_in_zip"],
         ).to_csv(root / "features.csv", index=False)
-        clip_index = pd.DataFrame({"chunk": chunk}, index=pd.Index(clip_ids, name="clip_id"))
+        clip_index = pd.DataFrame(
+            {"chunk": [chunk[c] if isinstance(chunk, dict) else chunk for c in clip_ids]},
+            index=pd.Index(clip_ids, name="clip_id"),
+        )
         if legacy_split is not None:
             clip_index["split"] = legacy_split
         clip_index.to_parquet(root / "clip_index.parquet")
@@ -58,9 +61,10 @@ def dataset_factory(
         for name, labels in (split_files or {}).items():
             (root / "splits").mkdir(exist_ok=True)
             labels.to_parquet(root / f"splits/{name}.parquet")
-        with zipfile.ZipFile(root / f"chunk_{chunk}.zip", "w") as archive:
-            for clip_id in clip_ids:
-                archive.writestr(f"{clip_id}/data.bin", payload)
+        for chunk_id, members in clip_index.groupby("chunk").groups.items():
+            with zipfile.ZipFile(root / f"chunk_{chunk_id}.zip", "w") as archive:
+                for clip_id in members:
+                    archive.writestr(f"{clip_id}/data.bin", payload)
         return PhysicalAIAVDatasetInterface(
             REVISION,
             repo_id=repo_id,
@@ -142,14 +146,15 @@ def test_named_split_adds_its_columns_without_warning(
         {"split": ["test", "train"], "t0": [[2_000_000, 5_000_000], []]},
         index=pd.Index(["other", "clip"], name="clip_id"),
     )
-    with caplog.at_level(logging.WARNING, logger="physical_ai_av"):
+    with caplog.at_level(logging.INFO, logger="physical_ai_av"):
         dataset = dataset_factory(
             clip_ids=("clip", "other"), split_files={"anchors": labels}, split_name="anchors"
         )
     assert dataset.clip_index.index.tolist() == ["clip", "other"]
     assert dataset.clip_index["split"].tolist() == ["train", "test"]
     assert list(dataset.clip_index.loc["other", "t0"]) == [2_000_000, 5_000_000]
-    assert _warnings(caplog) == []
+    assert len(dataset.feature_presence) == len(dataset.data_collection) == 2
+    assert caplog.records == []
 
 
 def test_partial_split_keeps_its_clips_only(
@@ -164,6 +169,7 @@ def test_partial_split_keeps_its_clips_only(
     with caplog.at_level(logging.INFO, logger="physical_ai_av"):
         dataset = dataset_factory(
             clip_ids=("clip", "other", "third"),
+            chunk={"clip": 1, "other": 2, "third": 1},
             split_files={"anchors": labels},
             split_name="anchors",
         )
@@ -173,7 +179,7 @@ def test_partial_split_keeps_its_clips_only(
     assert dataset.feature_presence.index.tolist() == ["clip", "third"]
     assert dataset.data_collection.index.tolist() == ["clip", "third"]
     assert dataset.chunk_feature_presence.index.tolist() == [1]
-    assert "other" not in dataset.clip_index.index
+    assert dataset.get_clip_feature("third", "payload")["data"].read() == b"original"
     with pytest.raises(KeyError):
         dataset.get_clip_feature("other", "payload")
     messages = [(record.levelno, record.message) for record in caplog.records]
@@ -224,6 +230,7 @@ def test_unavailable_default_split_adds_no_column(
     "labels, match",
     [
         (_split_file(t0=[[2_000_000]]), "no `split` column"),
+        (pd.DataFrame({"split": []}, index=pd.Index([], name="clip_id")), "lists no clips"),
         (_split_file(split=["test"], chunk=[1]), "already exist"),
         (
             pd.DataFrame({"split": ["test"]}, index=pd.Index(["unknown"], name="clip_id")),
@@ -240,6 +247,6 @@ def test_invalid_split_file_raises(
     labels: pd.DataFrame,
     match: str,
 ) -> None:
-    """Reject split files without labels, with clashing columns, or with unknown/repeated clips."""
+    """Reject split files without labels or clips, with clashing columns, or unknown/repeated clips."""
     with pytest.raises(ValueError, match=match):
         dataset_factory(split_files={"bad": labels}, split_name="bad")

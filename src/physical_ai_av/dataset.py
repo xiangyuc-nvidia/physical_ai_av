@@ -161,8 +161,6 @@ class PhysicalAIAVDatasetInterface(hf_interface.HfRepoInterface):
 
     def _restrict_to_clip_index(self, table: pd.DataFrame) -> pd.DataFrame:
         """Returns the rows of a per-clip `table` whose clips are in `clip_index`."""
-        if len(table) == len(self.clip_index):
-            return table
         return table[table.index.isin(self.clip_index.index)]
 
     def _load_split_labels(self, split_name: str) -> pd.DataFrame:
@@ -175,6 +173,8 @@ class PhysicalAIAVDatasetInterface(hf_interface.HfRepoInterface):
         labels = pd.read_parquet(self.download_file(f"splits/{split_name}.parquet"))
         if "split" not in labels.columns:
             raise ValueError(f"splits/{split_name}.parquet has no `split` column.")
+        if labels.empty:
+            raise ValueError(f"splits/{split_name}.parquet lists no clips.")
         if not labels.index.is_unique:
             raise ValueError(f"splits/{split_name}.parquet lists some clips more than once.")
         unknown = labels.index.difference(self.clip_index.index)
