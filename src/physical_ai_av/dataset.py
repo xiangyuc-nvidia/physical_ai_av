@@ -139,6 +139,13 @@ class PhysicalAIAVDatasetInterface(hf_interface.HfRepoInterface):
             )
             self.feature_presence = self.sensor_presence.select_dtypes(include=bool)
         self.feature_presence = self._restrict_to_clip_index(self.feature_presence)
+        for feature, source in self.feature_sources.items():
+            # A routed feature is only present for clips its source knows, e.g. when the source
+            # is restricted to the clips of a partial split file.
+            if feature in self.feature_presence.columns:
+                self.feature_presence[feature] &= self.feature_presence.index.isin(
+                    source.clip_index.index
+                )
 
         self.data_collection = self._restrict_to_clip_index(
             pd.read_parquet(self.download_file("metadata/data_collection.parquet"))
